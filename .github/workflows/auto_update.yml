@@ -120,7 +120,7 @@ jobs:
           steps.check.outputs.up_to_date == 'false' &&
           steps.existing_pr.outputs.pr_number == '' &&
           steps.merge.outputs.merge_failed == 'false'
-        run: git push origin "${{ steps.merge.outputs.branch }}"
+        run: git push --force-with-lease origin "${{ steps.merge.outputs.branch }}"
 
       - name: 📬 Open pull request
         if: >
