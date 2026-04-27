@@ -53,13 +53,17 @@ jobs:
           echo "fork_sha=$FORK_SHA"         >> "$GITHUB_OUTPUT"
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
 
-          if [ "$FORK_SHA" = "$UPSTREAM_SHA" ]; then
+          # Use merge-base to check whether upstream/master is already an ancestor
+          # of the fork's HEAD. This correctly handles forks that have local
+          # commits on top of upstream (e.g. the custom cron) — a plain SHA
+          # comparison would always report "not up to date" in that case.
+          if git merge-base --is-ancestor upstream/master HEAD; then
             echo "up_to_date=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ Fork is already up-to-date with upstream. Nothing to do."
           else
             echo "up_to_date=false" >> "$GITHUB_OUTPUT"
             # Collect short log of new upstream commits for the PR/issue body
-            LOG=$(git log --oneline "$FORK_SHA".."$UPSTREAM_SHA" | head -20)
+            LOG=$(git log --oneline HEAD..upstream/master | head -20)
             # Escape newlines for GITHUB_OUTPUT multiline value
             echo "new_commits<<EOF"     >> "$GITHUB_OUTPUT"
             echo "$LOG"                 >> "$GITHUB_OUTPUT"
@@ -76,7 +80,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING=$(gh pr list --state open --search "head:upstream-sync/ is:open" --json number --jq '.[0].number // ""')
+          # Use --json + jq to match any branch whose name starts with
+          # "upstream-sync/". The --search head: qualifier requires an exact
+          # branch name, so it would never match the dated branch names we create.
+          EXISTING=$(gh pr list --state open --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("upstream-sync/"))] | .[0].number // ""')
           echo "pr_number=$EXISTING" >> "$GITHUB_OUTPUT"
           if [ -n "$EXISTING" ]; then
             echo "ℹ️ An open upstream-sync PR (#$EXISTING) already exists — skipping."
