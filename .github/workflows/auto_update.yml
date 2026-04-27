@@ -1,0 +1,191 @@
+# Automatic upstream sync workflow
+#
+# This workflow fetches the latest changes from the upstream repository
+# (philosowaffle/peloton-to-garmin) and opens a pull request so the owner can
+# review diffs and re-apply any local customizations before merging.
+#
+# REQUIRED SETUP:
+#   In Settings → Actions → General → Workflow permissions, choose
+#   "Read and write permissions" so that GITHUB_TOKEN can push branches
+#   and open pull requests.
+
+name: 🔃 Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Every Monday at 06:00 UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync-upstream:
+    name: 🔃 Sync Upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⤵ Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Configure Git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: ➕ Add upstream remote
+        run: git remote add upstream https://github.com/philosowaffle/peloton-to-garmin.git
+
+      - name: 📥 Fetch upstream master
+        run: git fetch upstream master
+
+      - name: 🔍 Check for new upstream commits
+        id: check
+        run: |
+          FORK_SHA=$(git rev-parse HEAD)
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          echo "fork_sha=$FORK_SHA"         >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$FORK_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ Fork is already up-to-date with upstream. Nothing to do."
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            # Collect short log of new upstream commits for the PR/issue body
+            LOG=$(git log --oneline "$FORK_SHA".."$UPSTREAM_SHA" | head -20)
+            # Escape newlines for GITHUB_OUTPUT multiline value
+            echo "new_commits<<EOF"     >> "$GITHUB_OUTPUT"
+            echo "$LOG"                 >> "$GITHUB_OUTPUT"
+            echo "EOF"                  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⏭ Skip if already up-to-date
+        if: steps.check.outputs.up_to_date == 'true'
+        run: echo "Fork is up-to-date — skipping sync."
+
+      - name: 🔎 Check for existing open sync PR
+        if: steps.check.outputs.up_to_date == 'false'
+        id: existing_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --state open --search "head:upstream-sync/ is:open" --json number --jq '.[0].number // ""')
+          echo "pr_number=$EXISTING" >> "$GITHUB_OUTPUT"
+          if [ -n "$EXISTING" ]; then
+            echo "ℹ️ An open upstream-sync PR (#$EXISTING) already exists — skipping."
+          fi
+
+      - name: 🌿 Create sync branch and merge upstream
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.existing_pr.outputs.pr_number == ''
+        id: merge
+        run: |
+          BRANCH="upstream-sync/$(date -u +%Y-%m-%d)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH"
+
+          # Attempt the merge; capture exit code without aborting the shell
+          set +e
+          git merge --no-ff --allow-unrelated-histories \
+            -m "chore: merge upstream philosowaffle/peloton-to-garmin into $BRANCH" \
+            upstream/master
+          MERGE_EXIT=$?
+          set -e
+
+          if [ $MERGE_EXIT -ne 0 ]; then
+            echo "merge_failed=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          else
+            echo "merge_failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ⤴ Push sync branch
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.existing_pr.outputs.pr_number == '' &&
+          steps.merge.outputs.merge_failed == 'false'
+        run: git push origin "${{ steps.merge.outputs.branch }}"
+
+      - name: 📬 Open pull request
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.existing_pr.outputs.pr_number == '' &&
+          steps.merge.outputs.merge_failed == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+          FORK_SHA: ${{ steps.check.outputs.fork_sha }}
+          NEW_COMMITS: ${{ steps.check.outputs.new_commits }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          gh pr create \
+            --base master \
+            --head "$BRANCH" \
+            --title "chore: sync with upstream (philosowaffle/peloton-to-garmin)" \
+            --body "## ⬆️ Upstream Sync
+
+          This PR was automatically generated by the **Sync with Upstream** workflow.
+
+          | | SHA |
+          |---|---|
+          | **Upstream master** | \`$UPSTREAM_SHA\` |
+          | **Fork master (before sync)** | \`$FORK_SHA\` |
+
+          ### New upstream commits included
+          \`\`\`
+          $NEW_COMMITS
+          \`\`\`
+
+          ### ⚠️ Review checklist before merging
+          - [ ] Verify \`.github/workflows/sync_peloton_to_garmin.yml\` still uses the custom cron \`\"0 0,12 * * *\"\` (runs twice daily). The upstream uses \`'0 1 * * *'\` (once daily) — make sure the local customization is preserved.
+          - [ ] Check for any other local customizations that may have been overwritten.
+          - [ ] Test the Sync Workflow manually after merging.
+
+          @sxn-star Please review this PR before merging."
+
+      - name: 🚨 Open conflict issue
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.existing_pr.outputs.pr_number == '' &&
+          steps.merge.outputs.merge_failed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.check.outputs.upstream_sha }}
+          FORK_SHA: ${{ steps.check.outputs.fork_sha }}
+          NEW_COMMITS: ${{ steps.check.outputs.new_commits }}
+        run: |
+          gh issue create \
+            --title "🚨 Upstream sync failed — manual conflict resolution needed" \
+            --body "## Upstream Sync Failed
+
+          The **Sync with Upstream** workflow attempted to merge the latest upstream changes but encountered merge conflicts that require manual resolution.
+
+          | | SHA |
+          |---|---|
+          | **Upstream master** | \`$UPSTREAM_SHA\` |
+          | **Fork master** | \`$FORK_SHA\` |
+
+          ### New upstream commits that could not be merged automatically
+          \`\`\`
+          $NEW_COMMITS
+          \`\`\`
+
+          ### Steps to resolve manually
+          1. Clone/pull your fork locally.
+          2. Add the upstream remote: \`git remote add upstream https://github.com/philosowaffle/peloton-to-garmin.git\`
+          3. Fetch upstream: \`git fetch upstream\`
+          4. Create a sync branch: \`git checkout -b upstream-sync/manual\`
+          5. Merge: \`git merge upstream/master\`
+          6. Resolve conflicts, then commit and push.
+          7. Open a pull request targeting \`master\`.
+          8. After merging, verify \`.github/workflows/sync_peloton_to_garmin.yml\` still uses the custom cron \`\"0 0,12 * * *\"\`.
+
+          @sxn-star Manual action required."

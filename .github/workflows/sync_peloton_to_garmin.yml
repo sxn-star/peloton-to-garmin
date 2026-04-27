@@ -12,6 +12,8 @@ on:
       saveLocalCopy:
         type: boolean
         default: false
+  # LOCAL CUSTOMIZATION: runs twice daily (midnight & noon) instead of upstream's once-daily schedule ('0 1 * * *').
+  # Preserve this cron when merging upstream sync PRs.
   schedule:
     - cron: "0 0,12 * * *"
 
